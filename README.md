@@ -47,11 +47,16 @@ Or just open `https://api.protodex.io/ws/demo` in a browser. No auth needed for 
 
 ## Pricing
 
-| Tier | Price | Limit | Use case |
-|------|-------|-------|----------|
-| Free | $0 | 100 req/day | Hobbyists, evals |
-| Pro | $19/mo | 10,000 req/day | Backtests, dashboards |
-| Premium | $99/mo | Unlimited | Production trading, AI agents |
+| Tier | Price | Limit | What you get | Buy |
+|------|-------|-------|--------------|-----|
+| Free | $0 | 100 req/day | API + WS access, no auth | (just use it) |
+| Sample | $1 one-time | — | 1-day full SQLite dataset | [Gumroad](https://manja8.gumroad.com/l/polymarket-data) |
+| Standard | $9 one-time | 10K req/day for 30d | 30-day SQLite dataset + API key | [Gumroad](https://manja8.gumroad.com/l/agyjd) |
+| Cross-Signal | $29 one-time | 30K req/day for 30d | Cross-signal dataset (BTC/ETH/SOL + Gold + PM) + API key | [Gumroad](https://manja8.gumroad.com/l/cross-signal-dataset) |
+
+**Key issuance is manual for now** (email `LuciferForge@proton.me` with Gumroad purchase ID — typically issued within 24h). Self-serve via webhook coming Q2 once Lemon Squeezy onboarding clears.
+
+> Why Gumroad and not Stripe: Stripe doesn't onboard Indian sellers without a US/UK entity. Gumroad is the practical choice for a solo Indian dev shipping a global product. We pay the 10% friction tax for now.
 
 Free tier needs no signup. Pro/Premium via Stripe (coming).
 

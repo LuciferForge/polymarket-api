@@ -90,7 +90,11 @@ def check_rate_limit(api_key: str):
     if entry["count"] > limit:
         raise HTTPException(
             status_code=429,
-            detail=f"Rate limit exceeded ({limit}/day). Upgrade at https://checkout.dodopayments.com/buy/pdt_0NcwYR0akzPEQoh1leSk9"
+            detail=(
+                f"Rate limit exceeded ({limit}/day). "
+                "Upgrade options at https://manja8.gumroad.com — buy the $9 30-day dataset OR $29 cross-signal dataset, "
+                "then email LuciferForge@proton.me with your Gumroad purchase ID for an API key."
+            ),
         )
 
 
@@ -100,12 +104,14 @@ def root():
         "name": "Polymarket Data API",
         "version": "1.0.0",
         "docs": "/docs",
-        "endpoints": ["/markets", "/markets/{id}/prices", "/crashes", "/stats", "/categories"],
+        "endpoints": ["/markets", "/markets/{id}/prices", "/crashes", "/stats", "/categories", "/ws/crashes", "/ws/demo"],
         "pricing": {
             "free": "100 requests/day (no key required)",
-            "pro": "$19/mo — 10,000 requests/day",
-            "premium": "$99/mo — unlimited",
-            "subscribe": "https://checkout.dodopayments.com/buy/pdt_0NcwYR0akzPEQoh1leSk9",
+            "sample": "$1 one-time — 1-day full dataset (https://manja8.gumroad.com/l/polymarket-data)",
+            "standard": "$9 one-time — 30-day full dataset, includes 10K req/day API key for 30 days (https://manja8.gumroad.com/l/agyjd)",
+            "cross_signal": "$29 one-time — cross-signal dataset (BTC/ETH/SOL + Gold + PM), includes 30K req/day API key for 30 days (https://manja8.gumroad.com/l/cross-signal-dataset)",
+            "checkout_storefront": "https://manja8.gumroad.com",
+            "key_issuance": "Manual for now — email LuciferForge@proton.me with Gumroad purchase ID. Self-serve coming Q2.",
         },
         "data": "https://protodex.io | LuciferForge@proton.me",
     }
