@@ -18,16 +18,19 @@ Rate limits: Free (100/day), Pro (10K/day), Premium (unlimited)
 Deploy: Railway / Render / Fly.io (free tier)
 """
 
+import asyncio
+import json
 import os
 import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import wraps
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, Query, Depends
+from fastapi import FastAPI, HTTPException, Request, Query, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 import uvicorn
 
 # Config
@@ -329,8 +332,211 @@ def get_crashes(
     }
 
 
+# =====================================================================
+# WebSocket crash feed — streams new crashes as they appear
+# =====================================================================
+
+WS_SCAN_INTERVAL = 30  # seconds between scans
+WS_HOURS_WINDOW = 4
+
+class CrashFeedManager:
+    """Tracks subscribers and broadcasts new crash signals."""
+
+    def __init__(self) -> None:
+        self.subscribers: list[tuple[WebSocket, dict]] = []
+        self.seen: dict[str, float] = {}  # market_id -> drop_pct last broadcast
+        self.task: Optional[asyncio.Task] = None
+
+    async def connect(self, ws: WebSocket, params: dict) -> None:
+        await ws.accept()
+        self.subscribers.append((ws, params))
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._scan_loop())
+
+    def disconnect(self, ws: WebSocket) -> None:
+        self.subscribers = [(s, p) for (s, p) in self.subscribers if s is not ws]
+
+    async def _scan_loop(self) -> None:
+        while self.subscribers:
+            try:
+                await self._scan_and_broadcast()
+            except Exception as e:
+                print(f"[ws crash-feed] scan error: {e}")
+            await asyncio.sleep(WS_SCAN_INTERVAL)
+
+    async def _scan_and_broadcast(self) -> None:
+        if not self.subscribers:
+            return
+
+        loop = asyncio.get_running_loop()
+        crashes = await loop.run_in_executor(None, self._fetch_crashes)
+
+        new_or_changed = []
+        for c in crashes:
+            mid = c["market_id"]
+            prev = self.seen.get(mid)
+            # Broadcast if first time seen OR drop_pct grew by >2 percentage points
+            if prev is None or (c["drop_pct"] - prev) > 0.02:
+                new_or_changed.append(c)
+                self.seen[mid] = c["drop_pct"]
+
+        if not new_or_changed:
+            return
+
+        # Cleanup: forget crashes that have recovered (no longer in current scan)
+        current_ids = {c["market_id"] for c in crashes}
+        self.seen = {k: v for k, v in self.seen.items() if k in current_ids}
+
+        # Broadcast to each subscriber, filtered by their threshold/category
+        dead = []
+        for ws, params in self.subscribers:
+            try:
+                threshold = params.get("threshold", 0.15)
+                category = params.get("category")
+                filtered = [
+                    c for c in new_or_changed
+                    if c["drop_pct"] >= threshold
+                    and (not category or c.get("category") == category)
+                ]
+                if filtered:
+                    await ws.send_json({
+                        "type": "crash",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "count": len(filtered),
+                        "crashes": filtered,
+                    })
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
+    def _fetch_crashes(self) -> list[dict]:
+        conn = get_db()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=WS_HOURS_WINDOW)).isoformat()
+        rows = conn.execute("""
+            WITH recent AS (
+                SELECT market_id, outcome,
+                       MAX(price) as high,
+                       (SELECT price FROM prices p2
+                        WHERE p2.market_id = prices.market_id
+                        AND p2.outcome = prices.outcome
+                        ORDER BY p2.ts DESC LIMIT 1) as current
+                FROM prices
+                WHERE ts > ? AND outcome = 'Yes' AND price > 0.05
+                GROUP BY market_id, outcome
+                HAVING high > 0.10
+            )
+            SELECT r.market_id, r.high, r.current,
+                   ROUND((r.high - r.current) / r.high, 4) as drop_pct,
+                   m.question, m.category, m.volume
+            FROM recent r
+            JOIN markets m ON m.id = r.market_id
+            WHERE (r.high - r.current) / r.high > 0.05
+            ORDER BY drop_pct DESC LIMIT 100
+        """, (cutoff,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+
+crash_feed = CrashFeedManager()
+
+
+@app.websocket("/ws/crashes")
+async def ws_crashes(
+    websocket: WebSocket,
+    threshold: float = Query(0.15, ge=0.05, le=0.50),
+    category: Optional[str] = None,
+):
+    """Stream new crash signals as they appear.
+
+    Free tier: anyone can connect, default 0.15 threshold.
+    Pro tier ($19/mo): pass api_key in query string for prioritized scans + lower thresholds.
+    """
+    api_key = websocket.query_params.get("api_key", f"anon-{websocket.client.host}")
+    params = {"threshold": threshold, "category": category, "api_key": api_key}
+    await crash_feed.connect(websocket, params)
+    try:
+        await websocket.send_json({
+            "type": "hello",
+            "subscribed": params,
+            "scan_interval_s": WS_SCAN_INTERVAL,
+            "hours_window": WS_HOURS_WINDOW,
+            "note": "You'll receive a 'crash' message when any market drops past your threshold or its drop deepens.",
+        })
+        while True:
+            # Keep connection alive; ignore any client messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        crash_feed.disconnect(websocket)
+
+
+@app.get("/ws/demo", response_class=HTMLResponse)
+def ws_demo():
+    """Browser demo of the crash WebSocket. Click connect, watch crashes stream."""
+    return """<!doctype html>
+<html><head><meta charset="utf-8"><title>Polymarket Crash Feed — Live Demo</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:24px;max-width:900px;margin:auto}
+h1{margin:0 0 8px;font-size:22px}
+p.sub{color:#8b949e;margin:0 0 24px}
+.controls{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:16px}
+label{display:inline-block;margin-right:16px;color:#8b949e;font-size:13px}
+input,select{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:6px 10px;font-family:inherit;font-size:13px}
+button{background:#238636;color:#fff;border:0;border-radius:4px;padding:8px 16px;cursor:pointer;font-weight:600}
+button:disabled{background:#30363d;color:#8b949e;cursor:not-allowed}
+button.stop{background:#da3633}
+#status{margin:12px 0;font-size:13px}
+#feed{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:12px;font-family:ui-monospace,monospace;font-size:12px;height:60vh;overflow:auto;white-space:pre-wrap}
+.entry{padding:6px 0;border-bottom:1px solid #21262d}
+.entry .head{color:#58a6ff}
+.entry .pct{color:#f85149;font-weight:700}
+.entry .meta{color:#8b949e;margin-left:8px}
+a{color:#58a6ff}
+</style></head>
+<body>
+<h1>Polymarket Crash Feed — Live</h1>
+<p class="sub">Streams new prediction-market drops as they happen. Free, no auth. Source: <a href="https://github.com/LuciferForge/polymarket-api">github.com/LuciferForge/polymarket-api</a></p>
+<div class="controls">
+  <label>Threshold (drop %): <input id="threshold" type="number" min="0.05" max="0.5" step="0.01" value="0.15"></label>
+  <label>Category: <select id="category"><option value="">all</option><option>politics</option><option>sports</option><option>crypto</option><option>economics</option></select></label>
+  <button id="connect">Connect</button>
+  <button id="disconnect" class="stop" disabled>Disconnect</button>
+</div>
+<div id="status">Disconnected.</div>
+<div id="feed"></div>
+<script>
+let ws=null;
+const $=id=>document.getElementById(id);
+const log=(msg,cls)=>{const d=document.createElement('div');d.className='entry';d.innerHTML=msg;$('feed').prepend(d);};
+$('connect').onclick=()=>{
+  const t=$('threshold').value, c=$('category').value;
+  const proto=location.protocol==='https:'?'wss':'ws';
+  const url=`${proto}://${location.host}/ws/crashes?threshold=${t}${c?'&category='+c:''}`;
+  ws=new WebSocket(url);
+  $('status').textContent=`Connecting to ${url} ...`;
+  ws.onopen=()=>{$('status').textContent='Connected. Waiting for crash signals...';$('connect').disabled=true;$('disconnect').disabled=false;};
+  ws.onmessage=(ev)=>{
+    const m=JSON.parse(ev.data);
+    if(m.type==='hello'){log(`<span class="meta">[${m.ts||'hello'}] subscribed: threshold ${m.subscribed.threshold}, scan every ${m.scan_interval_s}s</span>`);return;}
+    if(m.type==='crash'){
+      m.crashes.forEach(c=>{
+        const pct=(c.drop_pct*100).toFixed(1);
+        log(`<span class="head">${c.question}</span><br><span class="pct">−${pct}%</span> <span class="meta">${c.category} · vol $${Math.round(c.volume).toLocaleString()} · ${c.high}→${c.current} · ${m.ts}</span>`);
+      });
+    }
+  };
+  ws.onclose=()=>{$('status').textContent='Disconnected.';$('connect').disabled=false;$('disconnect').disabled=true;};
+  ws.onerror=(e)=>log(`<span class="meta">error: ${e.message||'connection failed'}</span>`);
+};
+$('disconnect').onclick=()=>{if(ws)ws.close();};
+</script></body></html>"""
+
+
 if __name__ == "__main__":
     print(f"Starting Polymarket Data API on port {PORT}")
     print(f"DB: {DB_PATH}")
     print(f"Docs: http://127.0.0.1:{PORT}/docs")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    print(f"WebSocket demo: http://127.0.0.1:{PORT}/ws/demo")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, ws_ping_interval=30, ws_ping_timeout=10)

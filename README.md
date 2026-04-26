@@ -14,9 +14,36 @@ Built for backtesting prediction-market strategies, building dashboards, and fee
 | `GET /prices/{slug}?since=&until=&interval=` | OHLCV-style price snapshots for a market |
 | `GET /orderbook/{slug}` | Latest orderbook depth (bids/asks per outcome) |
 | `GET /crashes?threshold=0.20&hours=24` | Markets that dropped ≥X% in last Y hours |
+| `WS /ws/crashes?threshold=0.15&category=politics` | **Live crash stream** — push notification when any market drops past your threshold. 30s scan cadence. |
+| `GET /ws/demo` | Browser demo of the live crash stream (zero-code, just open in a browser) |
 | `GET /docs` | Auto-generated OpenAPI / Swagger docs |
 
 Full OpenAPI spec at `/docs`. Try the live endpoints at `api.protodex.io`.
+
+### WebSocket crash stream (the headline feature)
+
+```python
+import asyncio, websockets, json
+
+async def main():
+    uri = "wss://api.protodex.io/ws/crashes?threshold=0.15"
+    async with websockets.connect(uri) as ws:
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg["type"] == "crash":
+                for c in msg["crashes"]:
+                    print(f"-{c['drop_pct']*100:.0f}% {c['question']} ({c['category']})")
+
+asyncio.run(main())
+```
+
+Or just open `https://api.protodex.io/ws/demo` in a browser. No auth needed for the free tier.
+
+**What you receive:**
+- `hello` — on connect, confirms your filters
+- `crash` — when any matching market is newly past threshold OR its drop deepens by ≥2 points
+
+**Use cases:** automated trade signals, dashboard live-update, prediction-market alerting bot, AI-agent context push.
 
 ## Pricing
 
