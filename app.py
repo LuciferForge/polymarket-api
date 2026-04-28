@@ -109,7 +109,7 @@ def root():
             "free": "100 requests/day (no key required)",
             "sample": "$1 one-time — 1-day full dataset (https://manja8.gumroad.com/l/polymarket-data)",
             "standard": "$9 one-time — 30-day full dataset, includes 10K req/day API key for 30 days (https://manja8.gumroad.com/l/agyjd)",
-            "cross_signal": "$29 one-time — cross-signal dataset (BTC/ETH/SOL + Gold + PM), includes 30K req/day API key for 30 days (https://manja8.gumroad.com/l/cross-signal-dataset)",
+            "cross_signal": "$29 one-time — cross-signal dataset (BTC/ETH/SOL + Gold + Polymarket), includes 30K req/day API key for 30 days (https://manja8.gumroad.com/l/cross-signal-dataset)",
             "checkout_storefront": "https://manja8.gumroad.com",
             "key_issuance": "Manual for now — email LuciferForge@proton.me with Gumroad purchase ID. Self-serve coming Q2.",
         },
@@ -119,6 +119,104 @@ def root():
 
 _stats_cache = {"data": None, "expires": 0}
 STATS_TTL_SECONDS = 300
+
+
+# =====================================================================
+# Server-side proxies — keep auth credentials out of public client HTML
+# =====================================================================
+
+# Audit-order intake proxy. The audit-reports site (luciferforge.github.io)
+# previously called api.telegram.org/bot{TOKEN} directly from client JS,
+# leaking the bot token publicly (Security Incident 2026-04-26). The fix:
+# browser POSTs here, server forwards to Telegram with token from env.
+# Token NEVER touches client HTML.
+
+import urllib.request as _urlreq
+import urllib.parse as _urlparse
+
+_TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+_TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "257190241")
+_LAST_ORDER_TS: dict[str, float] = {}  # ip -> ts (rate limit key)
+ORDER_RATE_LIMIT_S = 30  # one submission per IP per 30s
+
+
+@app.options("/audit-orders")
+def audit_orders_preflight():
+    """CORS preflight for browser POSTs from luciferforge.github.io."""
+    from fastapi import Response
+    return Response(status_code=204, headers={
+        "Access-Control-Allow-Origin": "https://luciferforge.github.io",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+    })
+
+
+@app.post("/audit-orders")
+async def audit_orders(request: Request):
+    """Receive audit-order form submission, forward to Telegram.
+
+    Body: {name, email, github_repo, payment_id?, company?, server_command?}
+    Token + chat_id live ONLY in this server's env. Never in client.
+    """
+    from fastapi import HTTPException
+    if not _TELEGRAM_TOKEN:
+        raise HTTPException(503, "Order intake temporarily unavailable")
+
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    last = _LAST_ORDER_TS.get(client_ip, 0)
+    if now - last < ORDER_RATE_LIMIT_S:
+        raise HTTPException(429, f"One submission per {ORDER_RATE_LIMIT_S}s. Try again shortly.")
+    _LAST_ORDER_TS[client_ip] = now
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+
+    # Validate + sanitize
+    name = str(body.get("name", "")).strip()[:100]
+    email = str(body.get("email", "")).strip()[:200]
+    repo = str(body.get("github_repo", "")).strip()[:300]
+    payment_id = str(body.get("payment_id", "NONE")).strip()[:100]
+    company = str(body.get("company", "personal")).strip()[:100]
+    cmd = str(body.get("server_command", "auto")).strip()[:200]
+    if not (name and email and repo):
+        raise HTTPException(400, "Missing required fields: name, email, github_repo")
+    if "@" not in email:
+        raise HTTPException(400, "Invalid email")
+    if not (repo.startswith("https://github.com/") or repo.startswith("github.com/")):
+        raise HTTPException(400, "github_repo must be a GitHub URL")
+
+    msg = (
+        f"🔔 New audit order!\n"
+        f"Payment: {payment_id}\n"
+        f"{name} ({email})\n"
+        f"Repo: {repo}\n"
+        f"Company: {company}\n"
+        f"Command: {cmd}\n"
+        f"\n/order\nemail: {email}\nname: {name}\nrepo: {repo}\ncommand: {cmd}\ncompany: {company}"
+    )
+    payload = json.dumps({"chat_id": _TELEGRAM_CHAT_ID, "text": msg}).encode("utf-8")
+    req = _urlreq.Request(
+        f"https://api.telegram.org/bot{_TELEGRAM_TOKEN}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=8) as resp:
+            ok = resp.status == 200
+    except Exception as e:
+        # Don't leak Telegram errors to client; log server-side
+        print(f"[audit-orders] Telegram forward failed: {e}", flush=True)
+        raise HTTPException(502, "Order received but notification failed; we will follow up via email.")
+
+    return JSONResponse(
+        {"status": "received", "message": "Order forwarded. We'll email you within 3 business days."},
+        headers={"Access-Control-Allow-Origin": "https://luciferforge.github.io"},
+    )
 
 
 @app.get("/stats")

@@ -52,7 +52,7 @@ Or just open `https://api.protodex.io/ws/demo` in a browser. No auth needed for 
 | Free | $0 | 100 req/day | API + WS access, no auth | (just use it) |
 | Sample | $1 one-time | — | 1-day full SQLite dataset | [Gumroad](https://manja8.gumroad.com/l/polymarket-data) |
 | Standard | $9 one-time | 10K req/day for 30d | 30-day SQLite dataset + API key | [Gumroad](https://manja8.gumroad.com/l/agyjd) |
-| Cross-Signal | $29 one-time | 30K req/day for 30d | Cross-signal dataset (BTC/ETH/SOL + Gold + PM) + API key | [Gumroad](https://manja8.gumroad.com/l/cross-signal-dataset) |
+| Cross-Signal | $29 one-time | 30K req/day for 30d | Cross-signal dataset (BTC/ETH/SOL + Gold + Polymarket) + API key | [Gumroad](https://manja8.gumroad.com/l/cross-signal-dataset) |
 
 **Key issuance is manual for now** (email `LuciferForge@proton.me` with Gumroad purchase ID — typically issued within 24h). Self-serve via webhook coming Q2 once Lemon Squeezy onboarding clears.
 
